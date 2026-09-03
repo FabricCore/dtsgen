@@ -9,3 +9,5 @@ build
 
 # The generator config names paths specific to one machine; dtsgen.example.jsonc is the template
 dtsgen.jsonc
+
+app/bin
