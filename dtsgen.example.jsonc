@@ -1,0 +1,39 @@
+{
+  // Copy to dtsgen.jsonc, which is gitignored, and point it at your own machine.
+  // Paths take ${VAR} from the environment, ~ from your home directory, and anything
+  // relative from this file's own directory.
+  "out": "dist",
+  "sources": [
+    { "jar": "${JAVA_HOME}/jmods/java.base.jmod" }
+    // Add whatever else the scripts talk to -- a jar, a .jmod, or a directory of classes:
+    // { "jar": "~/.gradle/caches/modules-2/files-2.1/<group>/<name>/<version>/<sha1>/<name>-<version>.jar" },
+    // { "jar": "libs/somelibrary.jar" },
+    // { "dir": "build/classes/java/main" }
+  ],
+  // Read to resolve supertypes and signatures, but never emitted.
+  "classpathOnly": [],
+  "jsdoc": "params",
+  // "used" prunes the registry to the classes named under scriptRoots.
+  "registry": "full",
+  "scriptRoots": [],
+  "scope": {
+    // Emitted as bare names with no members, which severs the reference closure through them.
+    "opaque": [],
+    // Never emitted; references to these become `any`.
+    "exclude": [
+      "sun.**",
+      "jdk.**",
+      "com.sun.**",
+      "javax.**",
+      "java.security.**",
+      "java.lang.classfile.**",
+      "java.lang.invoke.**",
+      "java.lang.module.**",
+      "java.lang.ref.**",
+      "java.lang.reflect.**",
+      "java.nio.channels.**",
+      "java.nio.charset.**",
+      "java.nio.file.attribute.**"
+    ]
+  }
+}
