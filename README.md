@@ -1,5 +1,7 @@
 # DtsGenerator
 
+[Git](https://github.com/FabricCore/dtsgenerator) | [Maven](https://maven.siri.ws/#/releases/ws/siri/dtsgen)
+
 > [!IMPORTANT]
 > This repo is fully written by Claude. If you found a bug, please open an issue
 > instead of opening a PR, I will not be able to review your code and I do not
