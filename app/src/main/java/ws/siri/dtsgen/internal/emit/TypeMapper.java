@@ -48,9 +48,11 @@ final class TypeMapper {
             "java/lang/Float", "number",
             "java/lang/Double", "number");
 
+    private final TypeUniverse universe;
     private final Naming naming;
 
-    TypeMapper(Naming naming) {
+    TypeMapper(TypeUniverse universe, Naming naming) {
+        this.universe = universe;
         this.naming = naming;
     }
 
@@ -73,6 +75,76 @@ final class TypeMapper {
             return "JavaArray<" + render(array.element(), typeVars) + ">";
         }
         return renderClass((Sig.Cls) type, typeVars);
+    }
+
+    /**
+     * Renders a type in parameter position, where GraalJS also accepts the JS value it converts
+     * from: a function for a functional interface, an array for a List, an object for a Map.
+     * TypeScript has no conversion of its own, so the alternative has to be spelled out.
+     *
+     * @param receiverVars the type variables bound by the enclosing class rather than by the
+     *                     method, and so already fixed by the receiver at the call site
+     */
+    String renderParameter(Sig.Type type, Set<String> typeVars, Set<String> receiverVars) {
+        String rendered = render(type, typeVars);
+        // The two can both apply: Iterable is a functional interface and takes a JS array.
+        if (acceptsFunction(type, receiverVars)) {
+            rendered = "JavaFn<" + rendered + ">";
+        }
+        String alternative = jsAlternative(type, typeVars, receiverVars);
+        // Parenthesised because a varargs parameter appends [] to whatever comes back.
+        return alternative == null ? rendered : "(" + rendered + " | " + alternative + ")";
+    }
+
+    /**
+     * Whether a parameter of this type also accepts a plain JS function.
+     *
+     * <p>A concrete functional interface does. So does a type variable bound to one, which is
+     * how every Fabric callback is registered -- {@code Event<T>.register(T)} names no interface
+     * here at all. Which one it stands for is a call-site fact, but wrapping regardless is free:
+     * {@code JavaFn} falls through to the variable itself wherever it is not a function.
+     *
+     * <p>Only a variable the enclosing class binds qualifies. That one the receiver fixes before
+     * an argument is ever checked, whereas a method's own variable is inferred from the argument,
+     * and TypeScript infers poorly through a conditional type -- {@code <T> T identity(T)} would
+     * stop inferring anything useful.
+     */
+    private boolean acceptsFunction(Sig.Type type, Set<String> receiverVars) {
+        if (type instanceof Sig.Cls cls) {
+            return universe.isFunctionalInterface(cls.internalName());
+        }
+        return type instanceof Sig.Var variable && receiverVars.contains(variable.name());
+    }
+
+    /**
+     * The JS form of a parameter's type, or null where it has none. Type arguments render in
+     * parameter position too, because the conversion recurses: the elements of a JS array passed
+     * for a {@code List<Runnable>} are converted as they are read.
+     */
+    private String jsAlternative(Sig.Type type, Set<String> typeVars, Set<String> receiverVars) {
+        if (type instanceof Sig.Arr array) {
+            // Unlike the collections, a Java array is copied, and its elements are converted
+            // eagerly -- ["a"] is a String[] but [1] is not.
+            String alternative =
+                    "readonly " + renderParameter(array.element(), typeVars, receiverVars) + "[]";
+            boolean bytes = array.element() instanceof Sig.Prim prim && prim.code() == 'B';
+            return bytes ? alternative + " | ArrayBuffer | ArrayBufferView" : alternative;
+        }
+        if (!(type instanceof Sig.Cls cls)) return null;
+        return JsInterop.parameterAlternative(cls.internalName(),
+                parameterArg(cls, 0, typeVars, receiverVars),
+                parameterArg(cls, 1, typeVars, receiverVars));
+    }
+
+    /** The i-th type argument as a parameter renders it, or {@code any} where there is none. */
+    private String parameterArg(Sig.Cls type, int index, Set<String> typeVars,
+                                Set<String> receiverVars) {
+        List<Sig.Arg> args = type.args();
+        if (index >= args.size()) return "any";
+        Sig.Arg arg = args.get(index);
+        return arg.kind() == '+' || arg.kind() == '='
+                ? renderParameter(arg.type(), typeVars, receiverVars)
+                : "any";
     }
 
     private String renderClass(Sig.Cls type, Set<String> typeVars) {

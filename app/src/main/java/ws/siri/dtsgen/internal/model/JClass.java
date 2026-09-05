@@ -73,6 +73,9 @@ public final class JClass {
 
     public boolean isAbstract() { return (access & Opcodes.ACC_ABSTRACT) != 0; }
 
+    /** An {@code @interface}; its members are abstract but it is never a functional interface. */
+    public boolean isAnnotation() { return (access & Opcodes.ACC_ANNOTATION) != 0; }
+
     /** The top-level class whose file this type is emitted into. */
     public String topLevelName() { return JvmNames.topLevel(internalName); }
 

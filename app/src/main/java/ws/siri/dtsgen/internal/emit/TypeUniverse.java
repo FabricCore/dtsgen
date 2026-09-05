@@ -10,6 +10,7 @@ import ws.siri.dtsgen.internal.sig.Signatures;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -26,11 +27,16 @@ import java.util.TreeMap;
  */
 public final class TypeUniverse {
 
+    /** Erased keys of the public methods of Object, which an interface may redeclare freely. */
+    private static final Set<String> OBJECT_METHODS = Set.of(
+            "equals(Ljava/lang/Object;)Z", "hashCode()I", "toString()Ljava/lang/String;");
+
     private final ScanResult scan;
     private final GlobMatcher opaque;
     private final Set<String> emitted = new LinkedHashSet<>();
     private final Map<String, List<JClass>> typesByFile = new TreeMap<>();
     private final Map<String, Integer> arity = new LinkedHashMap<>();
+    private final Map<String, Boolean> functional = new HashMap<>();
 
     /**
      * @param scan     everything that was read
@@ -146,6 +152,63 @@ public final class TypeUniverse {
 
     public int fileCount() {
         return typesByFile.size();
+    }
+
+    /**
+     * True when a JS function can stand in for this type, which is what GraalJS does at a
+     * parameter of a functional interface. An opaque type is emitted without members, so
+     * nothing about it is callable.
+     */
+    public boolean isFunctionalInterface(String internalName) {
+        // Not computeIfAbsent: the computation recurses into superinterfaces, which writes to
+        // this same map.
+        Boolean cached = functional.get(internalName);
+        if (cached != null) return cached;
+        boolean result = computeFunctional(internalName);
+        functional.put(internalName, result);
+        return result;
+    }
+
+    private boolean computeFunctional(String internalName) {
+        JClass type = scan.find(internalName);
+        if (type == null || !isEmitted(internalName) || isOpaque(type)) return false;
+        // A class is never one, however many functional interfaces it happens to implement.
+        if (!type.isInterface() || type.isAnnotation()) return false;
+        List<JMember> abstracts = declaredAbstractMethods(type);
+        if (!abstracts.isEmpty()) return abstracts.size() == 1;
+        // UnaryOperator declares nothing of its own and is functional through Function. The
+        // emitted interface extends it, so the call signature is inherited on the TS side too.
+        for (String parent : type.interfaces()) {
+            if (isFunctionalInterface(parent)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * The interface's own single abstract method, or null when it does not declare exactly one.
+     *
+     * <p>A method inherited rather than declared is deliberately not returned: the emitted
+     * interface extends the one that declares it, so it already carries whatever that one got.
+     */
+    public JMember singleAbstractMethod(JClass type) {
+        List<JMember> abstracts = declaredAbstractMethods(type);
+        return abstracts.size() == 1 ? abstracts.get(0) : null;
+    }
+
+    /** The abstract methods this interface declares itself, the ones Object provides aside. */
+    private static List<JMember> declaredAbstractMethods(JClass type) {
+        // An annotation's elements are abstract too, and Java excludes annotations by fiat.
+        if (!type.isInterface() || type.isAnnotation()) return List.of();
+        List<JMember> abstracts = new ArrayList<>();
+        for (JMember method : type.methods()) {
+            if (!method.isPublic() || method.isSynthetic() || method.isBridge()) continue;
+            if (method.isStatic() || !method.isAbstract()) continue;
+            // Redeclaring a public method of Object -- as Comparator declares equals -- does not
+            // count against the one abstract method, since every instance already has it.
+            if (OBJECT_METHODS.contains(method.erasedKey())) continue;
+            abstracts.add(method);
+        }
+        return abstracts;
     }
 
     /** Public fields reachable on this type but declared by a supertype that is not emitted. */

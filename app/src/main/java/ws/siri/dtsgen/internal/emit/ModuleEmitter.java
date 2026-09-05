@@ -7,6 +7,7 @@ import ws.siri.dtsgen.internal.sig.Sig;
 import ws.siri.dtsgen.internal.sig.Signatures;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -51,7 +52,7 @@ public final class ModuleEmitter {
      */
     public String emit(String topLevelInternalName) {
         ModuleNaming naming = new ModuleNaming(topLevelInternalName);
-        TypeMapper mapper = new TypeMapper(naming);
+        TypeMapper mapper = new TypeMapper(universe, naming);
 
         // The body is rendered first: it is what discovers the imports, by asking the naming
         // context for a reference to every type it mentions.
@@ -135,9 +136,11 @@ public final class ModuleEmitter {
         boolean opaque = universe.isOpaque(type);
 
         Sig.ClassSig signature = Signatures.classSignature(type);
-        List<String> interfaces = opaque
-                ? List.of()
-                : renderedSupertypes(signature.interfaces(), classVars, mapper);
+        List<String> interfaces = new ArrayList<>();
+        if (!opaque) {
+            interfaces.addAll(renderedSupertypes(signature.interfaces(), classVars, mapper));
+            interfaces.addAll(JsInterop.hostSupertypes(type.internalName(), formalNames(formals)));
+        }
 
         sb.append(doc(type.isDeprecated(), List.of(), indent));
         if (type.isInterface()) {
@@ -163,6 +166,11 @@ public final class ModuleEmitter {
         sb.append(indent).append(topLevel ? "export declare " : "")
           .append(type.isAbstract() ? "abstract " : "")
           .append("class ").append(name).append(params).append(extendsClause).append(" {\n");
+        // Nothing in the bytecode declares `class`; Java spells it as a language construct and
+        // GraalJS puts it on the host type. Static members cannot mention the class's own type
+        // parameters, hence `any` for them -- which loses nothing, since a Class knows no more.
+        sb.append(indent).append("  static readonly class: JavaClass<")
+          .append(selfType(name, universe.formalsOf(type))).append(">;\n");
         if (!opaque) members(type, sb, indent + "  ", mapper, classVars, MemberStyle.CLASS);
         sb.append(indent).append("}\n");
 
@@ -188,7 +196,11 @@ public final class ModuleEmitter {
         String extendsClause = interfaces.isEmpty() ? "" : " extends " + String.join(", ", interfaces);
         sb.append(indent).append(topLevel ? "export " : "").append("interface ").append(name)
           .append(params).append(extendsClause).append(" {\n");
-        if (!opaque) members(type, sb, indent + "  ", mapper, classVars, MemberStyle.INTERFACE);
+        if (!opaque) {
+            writeCallSignature(type, sb, indent + "  ", mapper, classVars);
+            writeHostMembers(type, sb, indent + "  ");
+            members(type, sb, indent + "  ", mapper, classVars, MemberStyle.INTERFACE);
+        }
         sb.append(indent).append("}\n");
         emitInterfaceValueSide(type, sb, indent, topLevel, mapper, nested, opaque);
     }
@@ -208,9 +220,10 @@ public final class ModuleEmitter {
         // a type alone and leaves it uninstantiated.
         boolean hasNestedValues = nested.stream().anyMatch(n -> !n.isInterface());
 
+        String self = selfType(name, universe.formalsOf(type));
         if (!hasStatics && !hasNestedValues && nested.isEmpty()) {
             sb.append(indent).append(topLevel ? "export declare " : "").append("const ")
-              .append(name).append(": JavaInterface;\n");
+              .append(name).append(": JavaInterface<").append(self).append(">;\n");
             return;
         }
         sb.append(indent).append(topLevel ? "export declare " : "")
@@ -219,9 +232,51 @@ public final class ModuleEmitter {
         for (JClass child : nested) emitType(child, sb, indent + "  ", false, mapper);
         if (!hasStatics && !hasNestedValues) {
             // Every member so far is a type; give the namespace a value so `typeof` works.
-            sb.append(indent).append("  const __type: JavaInterface;\n");
+            sb.append(indent).append("  const __type: JavaInterface<").append(self)
+              .append(">;\n");
         }
         sb.append(indent).append("}\n");
+    }
+
+    /**
+     * A functional interface is callable from both sides -- GraalJS converts a JS function to
+     * one at a parameter position, and makes an instance of one executable at a return position
+     * -- but a bare {@code apply} member models neither, so a lambda is rejected outright. The
+     * named method stays: {@code f.apply(x)} is equally valid.
+     *
+     * <p>An interface whose single abstract method is inherited rather than declared needs
+     * nothing here; it picks the call signature up through its {@code extends} clause.
+     */
+    private void writeCallSignature(JClass type, StringBuilder sb, String indent,
+                                    TypeMapper mapper, Set<String> classVars) {
+        JMember sam = universe.singleAbstractMethod(type);
+        if (sam == null) return;
+        sb.append(indent).append(callSignature(sam, mapper, classVars)).append(";\n");
+    }
+
+    /**
+     * The members a type carries only because of how GraalJS presents it -- a List's length and
+     * index, an Iterable's iteration protocol -- which nothing in the bytecode declares.
+     */
+    private void writeHostMembers(JClass type, StringBuilder sb, String indent) {
+        List<Sig.Formal> formals = universe.formalsOf(type);
+        for (String member : JsInterop.hostMembers(type.internalName(), formalNames(formals))) {
+            sb.append(indent).append(member).append('\n');
+        }
+    }
+
+    /**
+     * The type a declaration introduces, as it can be named from inside itself:
+     * {@code Foo<any, any>}.
+     */
+    private static String selfType(String name, List<Sig.Formal> formals) {
+        if (formals.isEmpty()) return name;
+        return name + "<" + String.join(", ", Collections.nCopies(formals.size(), "any")) + ">";
+    }
+
+    /** A type's own type-parameter names, in declaration order. */
+    private static List<String> formalNames(List<Sig.Formal> formals) {
+        return formals.stream().map(Sig.Formal::name).toList();
     }
 
     private boolean hasVisibleStaticField(JClass type) {
@@ -370,11 +425,16 @@ public final class ModuleEmitter {
 
     /** {@code name<T>(a: A): R}, as a member declaration. */
     private String methodSignature(JMember method, TypeMapper mapper, Set<String> classVars) {
+        return Names.member(method.name()) + callSignature(method, mapper, classVars);
+    }
+
+    /** {@code <T>(a: A): R}, the same signature with the name left off. */
+    private String callSignature(JMember method, TypeMapper mapper, Set<String> classVars) {
         Sig.MethodSig signature = Signatures.method(method);
         Set<String> vars = scopeOf(classVars, signature);
-        return Names.member(method.name())
-                + mapper.renderFormals(signature.formals(), vars, false)
-                + "(" + parameterList(method, signature, mapper, vars) + ")"
+        return mapper.renderFormals(signature.formals(), vars, false)
+                + "(" + parameterList(method, signature, mapper, vars,
+                        receiverVarsOf(classVars, signature)) + ")"
                 + ": " + mapper.render(signature.returnType(), vars);
     }
 
@@ -384,7 +444,8 @@ public final class ModuleEmitter {
         for (JMember method : methods) {
             Sig.MethodSig signature = Signatures.method(method);
             Set<String> scope = scopeOf(vars, signature);
-            sb.append(" (").append(parameterList(method, signature, mapper, scope)).append("): ")
+            sb.append(" (").append(parameterList(method, signature, mapper, scope,
+                              receiverVarsOf(vars, signature))).append("): ")
               .append(mapper.render(signature.returnType(), scope)).append(';');
         }
         return sb.append(" }").toString();
@@ -392,11 +453,12 @@ public final class ModuleEmitter {
 
     private String parameterList(JMember method, TypeMapper mapper, Set<String> classVars) {
         Sig.MethodSig signature = Signatures.method(method);
-        return parameterList(method, signature, mapper, scopeOf(classVars, signature));
+        return parameterList(method, signature, mapper, scopeOf(classVars, signature),
+                receiverVarsOf(classVars, signature));
     }
 
     private String parameterList(JMember method, Sig.MethodSig signature, TypeMapper mapper,
-                                 Set<String> vars) {
+                                 Set<String> vars, Set<String> receiverVars) {
         List<Sig.Type> parameters = signature.params();
         boolean named = method.hasParameterNames(parameters.size());
         StringBuilder sb = new StringBuilder();
@@ -412,9 +474,11 @@ public final class ModuleEmitter {
             // valid; a required JavaArray parameter would reject them.
             if (last && method.isVarargs() && parameters.get(i) instanceof Sig.Arr array) {
                 sb.append("...").append(name).append(": ")
-                  .append(mapper.render(array.element(), vars)).append("[]");
+                  .append(mapper.renderParameter(array.element(), vars, receiverVars))
+                  .append("[]");
             } else {
-                sb.append(name).append(": ").append(mapper.render(parameters.get(i), vars));
+                sb.append(name).append(": ")
+                  .append(mapper.renderParameter(parameters.get(i), vars, receiverVars));
             }
         }
         return sb.toString();
@@ -424,6 +488,16 @@ public final class ModuleEmitter {
     private static Set<String> scopeOf(Set<String> classVars, Sig.MethodSig signature) {
         Set<String> vars = new LinkedHashSet<>(classVars);
         vars.addAll(Signatures.namesOf(signature.formals()));
+        return vars;
+    }
+
+    /**
+     * The class's type variables the method does not shadow, so the ones an argument cannot be
+     * asked to infer: the receiver has already fixed them by the time one is checked.
+     */
+    private static Set<String> receiverVarsOf(Set<String> classVars, Sig.MethodSig signature) {
+        Set<String> vars = new LinkedHashSet<>(classVars);
+        vars.removeAll(Signatures.namesOf(signature.formals()));
         return vars;
     }
 

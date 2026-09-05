@@ -32,6 +32,8 @@ public record JMember(int access, String name, String descriptor, String signatu
 
     public boolean isBridge() { return (access & Opcodes.ACC_BRIDGE) != 0; }
 
+    public boolean isAbstract() { return (access & Opcodes.ACC_ABSTRACT) != 0; }
+
     public boolean isConstructor() { return name.equals("<init>"); }
 
     /** The trailing parameter is a varargs array, which GraalJS expands at the call site. */

@@ -29,24 +29,69 @@ public final class RegistryEmitter {
             // "skipLibCheck": true is required -- Java permits overrides and inherited-member
             // conflicts that TypeScript rejects, all of them harmless inside a .d.ts.
 
-            /** A Java array. It is a host object, not a JS array: no map, no push, fixed length. */
-            interface JavaArray<T> {
+            /**
+             * The Array members a Java List keeps. A List is an array to GraalJS -- Array.isArray
+             * is true of it, list[0] and list.length work, and Array.prototype applies -- but a
+             * Java member of the same name wins, which is why sort, forEach, indexOf, lastIndexOf
+             * and toString are missing here: on a List those are Java's, with Java's signatures.
+             */
+            type JsArrayMembers<T> = Pick<Array<T>, "at" | "concat" | "copyWithin" | "entries"
+              | "every" | "fill" | "filter" | "find" | "findIndex" | "findLast" | "findLastIndex"
+              | "flat" | "flatMap" | "includes" | "join" | "keys" | "map" | "reduce"
+              | "reduceRight" | "reverse" | "slice" | "some" | "toLocaleString" | "toReversed"
+              | "toSorted" | "toSpliced" | "values" | "with" | typeof Symbol.unscopables>;
+
+            /**
+             * What iterating a JS array hands back, taken from Array itself because the lib's
+             * name for it moves between versions. Everything Java iterates gives JS one of
+             * these -- a List's is the very same object an array's is -- and saying so is what
+             * makes a List assignable to a readonly T[].
+             */
+            type JsIterator<T> = ReturnType<Array<T>[typeof Symbol.iterator]>;
+
+            /** The Array members that change the length, which a fixed-length Java array lacks. */
+            type JsArrayResizing<T> = Pick<Array<T>, "pop" | "push" | "shift" | "splice" | "unshift">;
+
+            /**
+             * A Java array. Array.prototype applies to it as it does to a List, but its length is
+             * fixed, so push and splice throw; it is still a host object, so Java.from is what
+             * copies it into a real JS array.
+             */
+            interface JavaArray<T> extends JsArrayMembers<T>,
+                Pick<Array<T>, "forEach" | "indexOf" | "lastIndexOf" | "sort"> {
               readonly length: number;
               [index: number]: T;
-              [Symbol.iterator](): IterableIterator<T>;
+              [Symbol.iterator](): JsIterator<T>;
             }
 
-            /** The class object of a Java interface that declares no statics and no nested types. */
-            interface JavaInterface {
-              readonly class: unknown;
+            /** The JS Date, under a name no emitted module can shadow with an import. */
+            type JsDate = Date;
+
+            /**
+             * What a Java interface's value side carries beyond its statics and nested types:
+             * the class object, which is the whole of it for one that declares neither.
+             */
+            interface JavaInterface<T> {
+              readonly class: JavaClass<T>;
             }
+
+            /**
+             * A parameter typed as a Java functional interface: GraalJS converts a plain JS
+             * function to one, so either form is accepted. NoInfer keeps a lambda's parameter
+             * and return types flowing from the function side alone, which is what lets
+             * `stream.map(s => s.length())` still come back as a Stream of numbers.
+             */
+            type JavaFn<I> = I extends (...args: infer A) => infer R
+              ? ((...args: A) => R) | NoInfer<I>
+              : I;
 
             declare const Java: {
               /** Looks up a Java class by binary name, e.g. "net.minecraft.core.BlockPos$MutableBlockPos". */
               type<K extends keyof JavaTypeRegistry>(name: K): JavaTypeRegistry[K];
               /** Escape hatch for a name that is not a literal; returns an untyped value. */
               typeUnchecked(name: string): any;
-              from<T>(array: JavaArray<T>): T[];
+              /** Copies a Java array or List into a real JS array. */
+              from<T>(array: ArrayLike<T>): T[];
               to<T>(values: readonly T[], type?: unknown): JavaArray<T>;
               extend(...types: readonly unknown[]): any;
               super(instance: any): any;
@@ -57,6 +102,26 @@ public final class RegistryEmitter {
               synchronized(lock: any, body: () => void): void;
             };
             """;
+
+    /**
+     * {@code JavaClass<T>}, the type of the {@code .class} member GraalJS puts on every host
+     * class and interface. Its target is an inline {@code import(...)} so that a module can
+     * name it without importing java.lang.Class, whose own closure is large.
+     */
+    private String classAlias() {
+        String target = universe.isEmitted("java/lang/Class")
+                // java.lang.Class is out of scope, so a class object is as untyped as one of
+                // its methods' return values would have been.
+                ? importRef("java/lang/Class") + "<T>"
+                : "any";
+        return """
+                /**
+                 * The class object of a Java class or interface: `Foo.class`. It lives on the
+                 * type alone -- an instance has getClass() and no `class` of its own.
+                 */
+                type JavaClass<T> = %s;
+                """.formatted(target);
+    }
 
     /** Directory holding the per-class modules, relative to the registry file. */
     private static final String MODULE_ROOT = "./full/";
@@ -72,12 +137,13 @@ public final class RegistryEmitter {
     public RegistryEmitter(TypeUniverse universe, Set<String> includedTopLevelTypes) {
         this.universe = universe;
         this.includedTopLevelTypes = includedTopLevelTypes;
-        this.mapper = new TypeMapper(new InlineImportNaming());
+        this.mapper = new TypeMapper(universe, new InlineImportNaming());
     }
 
     /** Renders the whole registry file. */
     public String emit() {
-        StringBuilder sb = new StringBuilder(PRELUDE).append('\n');
+        StringBuilder sb = new StringBuilder(PRELUDE).append('\n').append(classAlias());
+        sb.append('\n');
         emitAliases(sb);
         emitRegistry(sb);
         return sb.toString();
@@ -105,7 +171,7 @@ public final class RegistryEmitter {
         for (String internalName : includedTypes()) {
             List<Sig.Formal> formals = universe.formalsOf(universe.type(internalName));
             sb.append("type ").append(hiddenName(internalName))
-              .append(mapper.renderFormals(formals, Signatures.namesOf(formals), false))
+              .append(mapper.renderFormals(formals, Signatures.namesOf(formals), true))
               .append(" = ").append(importRef(internalName)).append(typeArguments(formals))
               .append(";\n");
         }
@@ -151,7 +217,13 @@ public final class RegistryEmitter {
         sb.append("interface JavaTypeRegistry {\n");
         for (String internalName : includedTypes()) {
             sb.append("  \"").append(JvmNames.binaryName(internalName)).append("\": typeof ")
-              .append(importRef(internalName)).append(";\n");
+              .append(importRef(internalName));
+            // A class carries its own `class` member as a static; an interface cannot, because
+            // its value side is a namespace and `class` is not a legal name for one's member.
+            if (universe.type(internalName).isInterface()) {
+                sb.append(" & JavaInterface<").append(hiddenName(internalName)).append(">");
+            }
+            sb.append(";\n");
         }
         sb.append("}\n");
 

@@ -11,6 +11,7 @@ import org.objectweb.asm.Type;
 import ws.siri.dtsgen.internal.model.JClass;
 import ws.siri.dtsgen.internal.model.JMember;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -25,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+import java.util.zip.ZipInputStream;
 
 /**
  * Reads class files with ASM without loading them.
@@ -33,10 +35,16 @@ import java.util.zip.ZipFile;
  * plain JVM without their full classpath, and loading them would run static initializers.
  * Reading bytes has neither problem, and works equally on a jar, a {@code .jmod} (which is
  * also a zip) and a directory of loose class files.
+ *
+ * <p>Archives are recursed into, because a mod jar is often only a container: fabric-api ships
+ * no classes of its own, just one jar per module under {@code META-INF/jars/}.
  */
 public final class ClassScanner {
 
     private static final int ASM_API = Opcodes.ASM9;
+
+    /** Real nesting is one level; the cap only stops a self-containing archive. */
+    private static final int MAX_ARCHIVE_DEPTH = 8;
 
     private final Map<String, JClass> classes = new LinkedHashMap<>();
     private final Set<String> emittable = new LinkedHashSet<>();
@@ -67,11 +75,22 @@ public final class ClassScanner {
         }
     }
 
+    /**
+     * Reads the loose class files under a directory, and any jar sitting in it.
+     *
+     * <p>Taking the jars too makes a whole mods folder a single source entry. The directory is
+     * taken wholesale, so whatever else lives there is scanned as well; {@code scope.exclude}
+     * is what trims that back.
+     */
     private void scanDirectory(Path root, boolean emit) throws IOException {
         try (var walk = Files.walk(root)) {
-            for (Path file : walk.filter(ClassScanner::isClassFile).toList()) {
-                try (InputStream in = Files.newInputStream(file)) {
-                    read(in.readAllBytes(), emit);
+            for (Path file : walk.filter(Files::isRegularFile).toList()) {
+                if (isArchiveFile(file)) {
+                    scanArchive(file, emit);
+                } else if (isClassFile(file)) {
+                    try (InputStream in = Files.newInputStream(file)) {
+                        read(in.readAllBytes(), emit);
+                    }
                 }
             }
         }
@@ -82,18 +101,68 @@ public final class ClassScanner {
             var entries = zip.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
-                if (entry.isDirectory() || !entry.getName().endsWith(".class")) continue;
-                // META-INF holds versioned duplicates and module descriptors, not API.
-                if (entry.getName().startsWith("META-INF/")) continue;
-                try (InputStream in = zip.getInputStream(entry)) {
-                    read(in.readAllBytes(), emit);
+                if (entry.isDirectory()) continue;
+                String name = entry.getName();
+                if (name.endsWith(".jar")) {
+                    try (InputStream in = zip.getInputStream(entry)) {
+                        scanNested(in.readAllBytes(), archive + "!" + name, emit, 1);
+                    }
+                } else if (isClassEntry(name)) {
+                    try (InputStream in = zip.getInputStream(entry)) {
+                        read(in.readAllBytes(), emit);
+                    }
                 }
             }
         }
     }
 
+    /**
+     * Scans an archive shipped inside another one.
+     *
+     * <p>Fabric mods package their modules this way: the fabric-api jar holds no classes of its
+     * own, only one jar per module under {@code META-INF/jars/}. Ignoring those would make such
+     * a source contribute nothing at all.
+     *
+     * @param bytes the nested archive, already extracted from its container
+     * @param label container-qualified name, used only to report an archive that failed to read
+     * @param depth how many archives deep this one sits, counting from the file on disk
+     */
+    private void scanNested(byte[] bytes, String label, boolean emit, int depth) {
+        if (depth > MAX_ARCHIVE_DEPTH) {
+            unreadable.add(label + ": nested more than " + MAX_ARCHIVE_DEPTH + " archives deep");
+            return;
+        }
+        // Buffered rather than streamed from the parent: a ZipInputStream wrapped around another
+        // closes it on the way out, which would end the enclosing walk after the first nested jar.
+        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(bytes))) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (entry.isDirectory()) continue;
+                String name = entry.getName();
+                // readAllBytes stops at the end of the current entry, not the whole archive.
+                if (name.endsWith(".jar")) {
+                    scanNested(zip.readAllBytes(), label + "!" + name, emit, depth + 1);
+                } else if (isClassEntry(name)) {
+                    read(zip.readAllBytes(), emit);
+                }
+            }
+        } catch (IOException ex) {
+            // A container is still worth the classes its other entries yielded.
+            unreadable.add(label + ": " + ex);
+        }
+    }
+
+    private static boolean isClassEntry(String name) {
+        // META-INF holds versioned duplicates and module descriptors, not API.
+        return name.endsWith(".class") && !name.startsWith("META-INF/");
+    }
+
     private static boolean isClassFile(Path path) {
         return path.toString().endsWith(".class");
+    }
+
+    private static boolean isArchiveFile(Path path) {
+        return path.toString().endsWith(".jar");
     }
 
     private void read(byte[] bytes, boolean emit) {

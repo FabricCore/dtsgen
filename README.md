@@ -44,7 +44,7 @@ file's own directory. Comments (`//`, `/* */`, `#`) are allowed; trailing commas
 | key | meaning |
 |---|---|
 | `out` | output root; gets `full/` and `java.d.ts` |
-| `sources` | jars, `.jmod`s or directories to emit |
+| `sources` | jars, `.jmod`s or directories to emit; jars are recursed into |
 | `classpathOnly` | read to resolve supertypes and signatures, never emitted |
 | `scope.exclude` | package globs to skip; references to them become `any` |
 | `scope.opaque` | emitted with no members, severing the reference closure through them |
@@ -56,12 +56,17 @@ Adding a jar is an entry in `sources`, never a code change:
 ```json
 { "jar": "${JAVA_HOME}/jmods/java.base.jmod" },
 { "jar": "~/.gradle/caches/fabric-loom/26.2/minecraft-merged.jar" },
+{ "jar": "../Mods/fabric-api-0.159.0+26.2.jar" },
 { "dir": "build/classes/java/main" }
 ```
 
-`.jmod`s work because they are zips; that is how the JDK gets in. Globs use `**` to span dots,
-`*` within one segment. Output is keyed by fully-qualified name, so jars merge into one `full/`
-tree and any one of them can be regenerated alone.
+`.jmod`s work because they are zips; that is how the JDK gets in. Nested jars are scanned too,
+which is what makes a mod jar work: fabric-api carries no classes of its own, only one jar per
+module under `META-INF/jars/`. A `dir` may likewise hold jars as well as loose class files, so
+`{ "dir": "../Mods" }` takes a whole mods folder -- wholesale, including anything else in it,
+which is what `scope.exclude` is for. Globs use `**` to span dots, `*` within one segment.
+Output is keyed by fully-qualified name, so jars merge into one `full/` tree and any one of them
+can be regenerated alone.
 
 ## Consuming it
 
@@ -79,7 +84,8 @@ its nested types folded in, and `java.d.ts`, holding the package-mirroring alias
 }
 ```
 
-`skipLibCheck` is **required**, not an optimisation: Java permits overrides and inherited-member
+The `lib` must reach ES2023 — `esnext` in the example project — since a List and a Java array
+are typed against the real `Array`. `skipLibCheck` is **required**, not an optimisation: Java permits overrides and inherited-member
 conflicts that TypeScript rejects — ~2,000 of them — all harmless inside a `.d.ts`.
 `exclude: ["dist"]` keeps the `**/*.js` glob out of the generated tree, which `java.d.ts`
 already pulls in.
@@ -119,7 +125,8 @@ descriptor does not export `ws.siri.dtsgen.internal`. A bad config or missing so
 ## The mapping
 
 - `long` becomes `number`; values beyond 2^53 lose precision
-- Java arrays are `JavaArray<T>`, not `T[]` — host objects with no `map` or `push`
+- Java arrays are `JavaArray<T>`: an array as far as JS is concerned — `Array.isArray`, an
+  index, `map`, `sort` — but a fixed-length one, so `push` and `splice` throw and are absent
 - varargs become TS rest parameters, since GraalJS expands them at the call site
 - `String`, `CharSequence` and the boxed primitives map to JS primitives, as Graal hands back
 - wildcards have no TS equivalent: `? extends T` is `T`, `? super T` and `?` are `any`
@@ -127,6 +134,42 @@ descriptor does not export `ws.siri.dtsgen.internal`. A bad config or missing so
 - a field and method sharing a name (`Vec3.x`, `x()`) become `number & { (): number }`
 - Java interfaces get an explicit value side; without it `Java.type` on one silently returns
   `any`, hidden by `skipLibCheck`. 674 are affected, 282 with statics
+- a functional interface parameter is `JavaFn<T>`, which takes a JS function as readily as an
+  instance, because GraalJS converts one at the call site and TypeScript has no such conversion
+  of its own; the interface itself gains a call signature, since an instance of one is
+  executable from JS too. `NoInfer` inside `JavaFn` keeps a lambda's types inferring, so it
+  needs TypeScript 5.4 or newer
+- a parameter typed as one of the *class's* type variables is wrapped too, which is what makes
+  `SomeEvents.EVENT.register(...)` take a lambda: `Event<T>.register(T)` names no interface at
+  all. Wrapping regardless is free, since `JavaFn` falls through wherever `T` is not a function.
+  A method's own type variable is left bare -- the receiver has already fixed a class variable
+  before an argument is checked, whereas `<T> T requireNonNull(T)` infers `T` *from* that
+  argument, and TypeScript infers poorly through a conditional type
+- a `List` is an array to JS as well, and the emitted interface says so: `length`, `list[0]`,
+  and the `Array.prototype` methods, `push` and `splice` included. Where a Java member has the
+  same name it wins, at runtime and here — `sort`, `forEach`, `indexOf` and `lastIndexOf` on a
+  List are Java's, with Java's signatures
+- so a `List<T>` or a `JavaArray<T>` satisfies `readonly T[]`, `ArrayLike<T>` and `Iterable<T>`,
+  but not a mutable `T[]`: Java's `sort` takes a required comparator and returns void, which is
+  also what it does at runtime, so `list.sort()` would throw. `Java.from(list)` or `[...list]`
+  copies into a real array where an annotation insists on one
+- whatever Java iterates, JS iterates: `Iterable` and `Iterator` carry `[Symbol.iterator]`, so
+  `for..of` and spread type-check on any of them. A `Stream` is the exception — it is not
+  iterable, so `.toList()` first
+- a parameter also takes the JS value GraalJS converts from: an array for a `List`, `Collection`
+  or `Iterable`, an object for a `Map<String, V>`, a two-element array for a `Map.Entry`, a
+  `Date` for an `Instant` or any of the `java.time` shapes, a buffer for a `byte[]`. The
+  conversion recurses through type arguments and so does the rendering, so
+  `Map<String, List<String>>` takes `{ a: ["x"] }`. The one exception is a type variable:
+  `List<Runnable>.addAll` will not take an array of functions, because widening `E` to a
+  function would cost inference everywhere else
+- a `Set` takes none of that, though the conversion looks like it succeeds: a guest object
+  satisfies any interface at all through a dynamic proxy, and then every call on it throws
+- `Foo.class` is a `Class<Foo>`, on a class and an interface alike, and stays absent on an
+  instance — which is what GraalJS does: `class` is a member of the host type, an instance has
+  `getClass()` and nothing else. A class declares it as a static; an interface gets it from the
+  `Java.type` registry instead, because an interface's statics live in a TS namespace and no
+  namespace member may be named `class`, so an interface imported rather than looked up lacks it
 - getters stay methods: no `.foo` for `getFoo()`, absent `js.nashorn-compat=true`
 
 Parameter names are real — `setPos(pos: Vec3)`, not `setPos(a0: Vec3)` — from the
@@ -136,7 +179,7 @@ have no body to read.
 
 ## Measured: Minecraft 26.2 + java.base + fabric-loader
 
-19,148 classes scanned, 9,313 types across 7,282 files (7.4 MB) plus a 3.9 MB registry, in 2.2s.
+19,270 classes scanned, 9,329 types across 7,303 files (8.0 MB) plus a 4.0 MB registry, in 2.2s.
 In tsserver, on a 134-line script using 12 Java types: 4.6s project load (once per session),
 52ms recheck, 8ms member completion, 34ms `Java.type("` completion over 9,313 names, 39ms hover,
 690 MB RSS. Rechecks run when typing pauses, not per keystroke.
