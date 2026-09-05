@@ -9,7 +9,7 @@ plugins {
 // Maven coordinates for consumers: ws.siri:dtsgen:<version>. Bump the version here on a
 // release; `./gradlew publishToMavenLocal` is enough to try it from another project.
 group = "ws.siri"
-version = "0.1.0"
+version = "0.1.1"
 
 repositories {
     mavenCentral()

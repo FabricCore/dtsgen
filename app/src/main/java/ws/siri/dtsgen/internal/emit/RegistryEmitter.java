@@ -85,21 +85,91 @@ public final class RegistryEmitter {
               ? ((...args: A) => R) | NoInfer<I>
               : I;
 
+            /**
+             * The value side of a Java type, as Java.type hands it back: a class's constructor, or
+             * the object an interface carries. Java.extend and Java.to both take one. It is the
+             * type itself -- a static field holding an instance, however suggestively named, is
+             * not one, and Java.extend rejects it.
+             */
+            type JavaType<T> = JavaInterface<T> | (abstract new (...args: any[]) => T);
+
+            /**
+             * What Java.extend builds: a constructor taking the overrides. Partial, because an
+             * abstract class may already implement most of what it declares -- and because a
+             * mapped type drops the call signature a functional interface carries, leaving the
+             * named method, which is the one an override has to answer to.
+             */
+            type JavaAdapter<T> = new (overrides: Partial<T>) => T;
+
+            /**
+             * GraalJS's Java interop object. Only what this configuration actually defines is declared
+             * here -- Java.synchronized, Java.isScriptObject, Java.asJSONCompatible and JavaImporter
+             * exist only under js.nashorn-compat, which is not enabled.
+             */
             declare const Java: {
-              /** Looks up a Java class by binary name, e.g. "net.minecraft.core.BlockPos$MutableBlockPos". */
+              /**
+               * Looks up a Java class by binary name, e.g. "net.minecraft.core.BlockPos$MutableBlockPos".
+               * A nested class accepts either $ or . before the inner name. Throws if nothing answers to
+               * the name, so there is no null to check.
+               */
               type<K extends keyof JavaTypeRegistry>(name: K): JavaTypeRegistry[K];
-              /** Escape hatch for a name that is not a literal; returns an untyped value. */
-              typeUnchecked(name: string): any;
-              /** Copies a Java array or List into a real JS array. */
-              from<T>(array: ArrayLike<T>): T[];
-              to<T>(values: readonly T[], type?: unknown): JavaArray<T>;
-              extend(...types: readonly unknown[]): any;
-              super(instance: any): any;
+              /** A name the registry does not carry: an array type, a primitive, or one built at runtime. */
+              type(name: string): any;
+
+              /**
+               * Copies a Java array or List into a real JS array. Nothing else converts -- a Map or a
+               * plain JS array throws -- and a List is assignable to readonly T[], which is why one
+               * type-checks here.
+               */
+              from<T>(javaArrayOrList: JavaArray<T> | readonly T[]): T[];
+
+              /**
+               * Copies a JS array into a Java array. The result is an Object[] unless a type says
+               * otherwise, as either a name or a type object: Java.to(xs, "int[]").
+               */
+              to<T>(values: readonly T[], type?: JavaType<unknown> | string): JavaArray<T>;
+
+              /**
+               * Builds a class implementing an interface or extending an abstract class, taking the
+               * overrides as an object. This is how a callback reaches a parameter GraalJS will not
+               * convert a function for -- one whose erased type is Object, as Event<T>.register(T) is.
+               *
+               * What it takes is the nested type, reachable by name from the type that encloses it.
+               * The SCREAMING_CASE static beside it is the event instance, not a type, and passing
+               * that is the easy mistake:
+               *
+               *     const Events = Java.type("net.fabricmc...ClientPlayerBlockBreakEvents");
+               *     Events.AFTER.register(new (Java.extend(Events.After))({
+               *       afterBlockBreak: (world, player, pos, state) => { ... },
+               *     }));
+               */
+              extend<T>(type: JavaType<T>): JavaAdapter<T>;
+              /** Several at once: at most one class, and any number of interfaces. */
+              extend<A, B>(a: JavaType<A>, b: JavaType<B>): JavaAdapter<A & B>;
+              extend<A, B, C>(a: JavaType<A>, b: JavaType<B>, c: JavaType<C>): JavaAdapter<A & B & C>;
+              /** More types than the arities above name, which no single instance type describes. */
+              extend(...types: readonly JavaType<unknown>[]): any;
+
+              /**
+               * The super-implementations of an object Java.extend produced, for an override to call
+               * through to. Anything else gives undefined rather than throwing.
+               */
+              super(adapter: object): any;
+
+              /** Whether the value is a host object rather than a JS one. */
               isJavaObject(value: unknown): boolean;
+
+              /** Whether the value is a Java type itself rather than an instance of one. */
               isType(value: unknown): boolean;
+
+              /**
+               * The binary name of a Java type. An instance answers undefined, not its class name --
+               * getClass().getName() is what names the class of a value.
+               */
               typeName(value: unknown): string | undefined;
+
+              /** Adds a jar or directory to the host classpath. */
               addToClasspath(path: string): void;
-              synchronized(lock: any, body: () => void): void;
             };
             """;
 
