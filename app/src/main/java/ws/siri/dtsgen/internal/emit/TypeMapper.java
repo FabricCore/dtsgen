@@ -179,17 +179,49 @@ final class TypeMapper {
     }
 
     /**
-     * Renders {@code <T extends Bound, U>}, or "" when the declaration is not generic.
+     * Renders {@code <T extends Bound, U>} for a method, or "" when it is not generic.
      *
      * @param withDefaults appends {@code = any} to each parameter, which lets the type be
      *                     written without type arguments at all
      */
     String renderFormals(List<Sig.Formal> formals, Set<String> typeVars, boolean withDefaults) {
+        return renderFormals(formals, typeVars, withDefaults, false);
+    }
+
+    /**
+     * The same, for a class or interface, where a declaration of more than one type parameter
+     * marks each of them {@code in out}. Java generics are invariant -- a {@code List<Dog>} is
+     * not a {@code List<Animal>} -- so the annotation only restates what Java already means.
+     * Its real job is to spare TypeScript from measuring the variance itself, which on a
+     * mutually recursive pair such as
+     * {@code RequiredArgumentBuilder<S, T>.build(): ArgumentCommandNode<S, T>} and
+     * {@code ArgumentCommandNode<S, T>.createBuilder(): RequiredArgumentBuilder<S, T>} never
+     * bottoms out: every assignability check touching either type then fails with TS2589,
+     * "type instantiation is excessively deep and possibly infinite".
+     *
+     * <p>Only multi-parameter declarations get the annotation. The same recursion over a single
+     * parameter stays within TypeScript's depth limit -- {@code LiteralArgumentBuilder<S>} and
+     * {@code LiteralCommandNode<S>} are the same shape and check fine -- and annotating those
+     * too resolved no further TS2589 while costing several thousand fresh errors in the
+     * reflection plumbing, where {@code Class<T>.getTypeParameters(): TypeVariable<Class<T>>[]}
+     * relies on the covariance TypeScript would otherwise have inferred.
+     *
+     * <p>Only for a declaration: a method (TS1274) and a type alias to anything but a literal
+     * object, function, constructor or mapped type (TS2637) both reject the annotation.
+     */
+    String renderDeclarationFormals(List<Sig.Formal> formals, Set<String> typeVars,
+                                    boolean withDefaults) {
+        return renderFormals(formals, typeVars, withDefaults, formals.size() > 1);
+    }
+
+    private String renderFormals(List<Sig.Formal> formals, Set<String> typeVars,
+                                 boolean withDefaults, boolean invariant) {
         if (formals.isEmpty()) return "";
         StringBuilder sb = new StringBuilder("<");
         for (int i = 0; i < formals.size(); i++) {
             Sig.Formal formal = formals.get(i);
             if (i > 0) sb.append(", ");
+            if (invariant) sb.append("in out ");
             sb.append(formal.name());
             String bound = renderBound(formal.bounds(), typeVars);
             if (bound != null) sb.append(" extends ").append(bound);

@@ -130,7 +130,7 @@ public final class ModuleEmitter {
                           TypeMapper mapper) {
         List<Sig.Formal> formals = universe.formalsOf(type);
         Set<String> classVars = Signatures.namesOf(formals);
-        String params = mapper.renderFormals(formals, classVars, false);
+        String params = mapper.renderDeclarationFormals(formals, classVars, false);
         String name = type.simpleName();
         List<JClass> nested = universe.directNestedTypes(type);
         boolean opaque = universe.isOpaque(type);

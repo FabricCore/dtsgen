@@ -171,6 +171,15 @@ descriptor does not export `ws.siri.dtsgen.internal`. A bad config or missing so
   `Java.type` registry instead, because an interface's statics live in a TS namespace and no
   namespace member may be named `class`, so an interface imported rather than looked up lacks it
 - getters stay methods: no `.foo` for `getFoo()`, absent `js.nashorn-compat=true`
+- a class or interface of more than one type parameter marks each of them `in out`. Java
+  generics are invariant anyway, but the point is to stop TypeScript measuring the variance
+  itself: over a mutually recursive pair like `RequiredArgumentBuilder<S, T>.build()` returning
+  `ArgumentCommandNode<S, T>` and its `createBuilder()` returning the builder back, the
+  measurement never bottoms out, and every assignability check touching either type fails with
+  TS2589. A single parameter stays inside the depth limit — `LiteralArgumentBuilder<S>` is the
+  same shape and checks fine — and annotating those too fixed no further TS2589 while breaking
+  the covariance `Class<T>.getTypeParameters()` and its neighbours rely on, so it is left off.
+  Needs TypeScript 4.7 or newer
 
 Parameter names are real — `setPos(pos: Vec3)`, not `setPos(a0: Vec3)` — from the
 `MethodParameters` attribute, falling back to the `LocalVariableTable` by JVM slot — **97.8%**

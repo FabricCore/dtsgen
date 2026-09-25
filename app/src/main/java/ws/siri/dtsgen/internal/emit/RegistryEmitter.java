@@ -271,7 +271,7 @@ public final class RegistryEmitter {
         List<Sig.Formal> formals = universe.formalsOf(type);
 
         sb.append(indent).append("interface ").append(name)
-          .append(mapper.renderFormals(formals, Signatures.namesOf(formals), true))
+          .append(mapper.renderDeclarationFormals(formals, Signatures.namesOf(formals), true))
           .append(" extends ").append(hiddenName(type.internalName()))
           .append(typeArguments(formals)).append(" {}\n");
 
