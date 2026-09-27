@@ -139,12 +139,14 @@ descriptor does not export `ws.siri.dtsgen.internal`. A bad config or missing so
   of its own; the interface itself gains a call signature, since an instance of one is
   executable from JS too. `NoInfer` inside `JavaFn` keeps a lambda's types inferring, so it
   needs TypeScript 5.4 or newer
-- a parameter typed as one of the *class's* type variables is wrapped too, which is what makes
-  `SomeEvents.EVENT.register(...)` take a lambda: `Event<T>.register(T)` names no interface at
-  all. Wrapping regardless is free, since `JavaFn` falls through wherever `T` is not a function.
-  A method's own type variable is left bare -- the receiver has already fixed a class variable
-  before an argument is checked, whereas `<T> T requireNonNull(T)` infers `T` *from* that
-  argument, and TypeScript infers poorly through a conditional type
+- a parameter typed as a type variable is never wrapped, because GraalJS converts by the
+  *erased* parameter type: `Event<T>.register(T)` is `register(Object)` at runtime, so a JS
+  function arrives as a `PolyglotMapAndFunction` implementing no interface, and Fabric's
+  array-backed event throws as it stores it. `SomeEvents.EVENT.register(...)` therefore needs
+  `new (Java.extend(Callback))(fn)` -- an adapter takes a bare function for a functional
+  interface -- and the emitted type only admits that. Two cases still type-check a function that
+  fails the same way: an `Object` parameter, which is `any`, and an overload set with an
+  `Object` variant beside the interface one, which GraalJS picks for a function
 - a `List` is an array to JS as well, and the emitted interface says so: `length`, `list[0]`,
   and the `Array.prototype` methods, `push` and `splice` included. Where a Java member has the
   same name it wins, at runtime and here — `sort`, `forEach`, `indexOf` and `lastIndexOf` on a
@@ -161,8 +163,8 @@ descriptor does not export `ws.siri.dtsgen.internal`. A bad config or missing so
   `Date` for an `Instant` or any of the `java.time` shapes, a buffer for a `byte[]`. The
   conversion recurses through type arguments and so does the rendering, so
   `Map<String, List<String>>` takes `{ a: ["x"] }`. The one exception is a type variable:
-  `List<Runnable>.addAll` will not take an array of functions, because widening `E` to a
-  function would cost inference everywhere else
+  `List<Runnable>.addAll` will not take an array of functions, because `E` erases to `Object`
+  and the elements would go in unconverted
 - a `Set` takes none of that, though the conversion looks like it succeeds: a guest object
   satisfies any interface at all through a dynamic proxy, and then every call on it throws
 - `Foo.class` is a `Class<Foo>`, on a class and an interface alike, and stays absent on an

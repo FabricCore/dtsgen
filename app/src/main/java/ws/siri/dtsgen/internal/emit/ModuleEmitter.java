@@ -433,8 +433,7 @@ public final class ModuleEmitter {
         Sig.MethodSig signature = Signatures.method(method);
         Set<String> vars = scopeOf(classVars, signature);
         return mapper.renderFormals(signature.formals(), vars, false)
-                + "(" + parameterList(method, signature, mapper, vars,
-                        receiverVarsOf(classVars, signature)) + ")"
+                + "(" + parameterList(method, signature, mapper, vars) + ")"
                 + ": " + mapper.render(signature.returnType(), vars);
     }
 
@@ -444,8 +443,7 @@ public final class ModuleEmitter {
         for (JMember method : methods) {
             Sig.MethodSig signature = Signatures.method(method);
             Set<String> scope = scopeOf(vars, signature);
-            sb.append(" (").append(parameterList(method, signature, mapper, scope,
-                              receiverVarsOf(vars, signature))).append("): ")
+            sb.append(" (").append(parameterList(method, signature, mapper, scope)).append("): ")
               .append(mapper.render(signature.returnType(), scope)).append(';');
         }
         return sb.append(" }").toString();
@@ -453,12 +451,11 @@ public final class ModuleEmitter {
 
     private String parameterList(JMember method, TypeMapper mapper, Set<String> classVars) {
         Sig.MethodSig signature = Signatures.method(method);
-        return parameterList(method, signature, mapper, scopeOf(classVars, signature),
-                receiverVarsOf(classVars, signature));
+        return parameterList(method, signature, mapper, scopeOf(classVars, signature));
     }
 
     private String parameterList(JMember method, Sig.MethodSig signature, TypeMapper mapper,
-                                 Set<String> vars, Set<String> receiverVars) {
+                                 Set<String> vars) {
         List<Sig.Type> parameters = signature.params();
         boolean named = method.hasParameterNames(parameters.size());
         StringBuilder sb = new StringBuilder();
@@ -474,11 +471,11 @@ public final class ModuleEmitter {
             // valid; a required JavaArray parameter would reject them.
             if (last && method.isVarargs() && parameters.get(i) instanceof Sig.Arr array) {
                 sb.append("...").append(name).append(": ")
-                  .append(mapper.renderParameter(array.element(), vars, receiverVars))
+                  .append(mapper.renderParameter(array.element(), vars))
                   .append("[]");
             } else {
                 sb.append(name).append(": ")
-                  .append(mapper.renderParameter(parameters.get(i), vars, receiverVars));
+                  .append(mapper.renderParameter(parameters.get(i), vars));
             }
         }
         return sb.toString();
@@ -488,16 +485,6 @@ public final class ModuleEmitter {
     private static Set<String> scopeOf(Set<String> classVars, Sig.MethodSig signature) {
         Set<String> vars = new LinkedHashSet<>(classVars);
         vars.addAll(Signatures.namesOf(signature.formals()));
-        return vars;
-    }
-
-    /**
-     * The class's type variables the method does not shadow, so the ones an argument cannot be
-     * asked to infer: the receiver has already fixed them by the time one is checked.
-     */
-    private static Set<String> receiverVarsOf(Set<String> classVars, Sig.MethodSig signature) {
-        Set<String> vars = new LinkedHashSet<>(classVars);
-        vars.removeAll(Signatures.namesOf(signature.formals()));
         return vars;
     }
 

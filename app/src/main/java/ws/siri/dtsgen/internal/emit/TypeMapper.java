@@ -81,17 +81,14 @@ final class TypeMapper {
      * Renders a type in parameter position, where GraalJS also accepts the JS value it converts
      * from: a function for a functional interface, an array for a List, an object for a Map.
      * TypeScript has no conversion of its own, so the alternative has to be spelled out.
-     *
-     * @param receiverVars the type variables bound by the enclosing class rather than by the
-     *                     method, and so already fixed by the receiver at the call site
      */
-    String renderParameter(Sig.Type type, Set<String> typeVars, Set<String> receiverVars) {
+    String renderParameter(Sig.Type type, Set<String> typeVars) {
         String rendered = render(type, typeVars);
         // The two can both apply: Iterable is a functional interface and takes a JS array.
-        if (acceptsFunction(type, receiverVars)) {
+        if (acceptsFunction(type)) {
             rendered = "JavaFn<" + rendered + ">";
         }
-        String alternative = jsAlternative(type, typeVars, receiverVars);
+        String alternative = jsAlternative(type, typeVars);
         // Parenthesised because a varargs parameter appends [] to whatever comes back.
         return alternative == null ? rendered : "(" + rendered + " | " + alternative + ")";
     }
@@ -99,21 +96,15 @@ final class TypeMapper {
     /**
      * Whether a parameter of this type also accepts a plain JS function.
      *
-     * <p>A concrete functional interface does. So does a type variable bound to one, which is
-     * how every Fabric callback is registered -- {@code Event<T>.register(T)} names no interface
-     * here at all. Which one it stands for is a call-site fact, but wrapping regardless is free:
-     * {@code JavaFn} falls through to the variable itself wherever it is not a function.
-     *
-     * <p>Only a variable the enclosing class binds qualifies. That one the receiver fixes before
-     * an argument is ever checked, whereas a method's own variable is inferred from the argument,
-     * and TypeScript infers poorly through a conditional type -- {@code <T> T identity(T)} would
-     * stop inferring anything useful.
+     * <p>GraalJS converts a function only when the parameter's erased type is itself the
+     * functional interface. A type variable does not qualify, whatever it is instantiated with:
+     * {@code Event<T>.register(T)} erases to {@code register(Object)}, so Java receives a
+     * {@code PolyglotMapAndFunction} that implements no interface at all, and Fabric's
+     * array-backed event fails the moment it stores it. A listener for one of those has to be
+     * built with {@code Java.extend}, which is the only form this type admits.
      */
-    private boolean acceptsFunction(Sig.Type type, Set<String> receiverVars) {
-        if (type instanceof Sig.Cls cls) {
-            return universe.isFunctionalInterface(cls.internalName());
-        }
-        return type instanceof Sig.Var variable && receiverVars.contains(variable.name());
+    private boolean acceptsFunction(Sig.Type type) {
+        return type instanceof Sig.Cls cls && universe.isFunctionalInterface(cls.internalName());
     }
 
     /**
@@ -121,29 +112,27 @@ final class TypeMapper {
      * parameter position too, because the conversion recurses: the elements of a JS array passed
      * for a {@code List<Runnable>} are converted as they are read.
      */
-    private String jsAlternative(Sig.Type type, Set<String> typeVars, Set<String> receiverVars) {
+    private String jsAlternative(Sig.Type type, Set<String> typeVars) {
         if (type instanceof Sig.Arr array) {
             // Unlike the collections, a Java array is copied, and its elements are converted
             // eagerly -- ["a"] is a String[] but [1] is not.
-            String alternative =
-                    "readonly " + renderParameter(array.element(), typeVars, receiverVars) + "[]";
+            String alternative = "readonly " + renderParameter(array.element(), typeVars) + "[]";
             boolean bytes = array.element() instanceof Sig.Prim prim && prim.code() == 'B';
             return bytes ? alternative + " | ArrayBuffer | ArrayBufferView" : alternative;
         }
         if (!(type instanceof Sig.Cls cls)) return null;
         return JsInterop.parameterAlternative(cls.internalName(),
-                parameterArg(cls, 0, typeVars, receiverVars),
-                parameterArg(cls, 1, typeVars, receiverVars));
+                parameterArg(cls, 0, typeVars),
+                parameterArg(cls, 1, typeVars));
     }
 
     /** The i-th type argument as a parameter renders it, or {@code any} where there is none. */
-    private String parameterArg(Sig.Cls type, int index, Set<String> typeVars,
-                                Set<String> receiverVars) {
+    private String parameterArg(Sig.Cls type, int index, Set<String> typeVars) {
         List<Sig.Arg> args = type.args();
         if (index >= args.size()) return "any";
         Sig.Arg arg = args.get(index);
         return arg.kind() == '+' || arg.kind() == '='
-                ? renderParameter(arg.type(), typeVars, receiverVars)
+                ? renderParameter(arg.type(), typeVars)
                 : "any";
     }
 
@@ -189,29 +178,43 @@ final class TypeMapper {
     }
 
     /**
-     * The same, for a class or interface, where a declaration of more than one type parameter
-     * marks each of them {@code in out}. Java generics are invariant -- a {@code List<Dog>} is
-     * not a {@code List<Animal>} -- so the annotation only restates what Java already means.
-     * Its real job is to spare TypeScript from measuring the variance itself, which on a
-     * mutually recursive pair such as
+     * The same, for a class or interface, where every declaration marks each of its parameters
+     * {@code in out}. Java generics are invariant -- a {@code List<Dog>} is not a
+     * {@code List<Animal>} -- so the annotation only restates what Java already means. Its real
+     * job is to spare TypeScript from measuring the variance itself, which on a mutually
+     * recursive pair such as
      * {@code RequiredArgumentBuilder<S, T>.build(): ArgumentCommandNode<S, T>} and
      * {@code ArgumentCommandNode<S, T>.createBuilder(): RequiredArgumentBuilder<S, T>} never
      * bottoms out: every assignability check touching either type then fails with TS2589,
      * "type instantiation is excessively deep and possibly infinite".
      *
-     * <p>Only multi-parameter declarations get the annotation. The same recursion over a single
-     * parameter stays within TypeScript's depth limit -- {@code LiteralArgumentBuilder<S>} and
-     * {@code LiteralCommandNode<S>} are the same shape and check fine -- and annotating those
-     * too resolved no further TS2589 while costing several thousand fresh errors in the
-     * reflection plumbing, where {@code Class<T>.getTypeParameters(): TypeVariable<Class<T>>[]}
-     * relies on the covariance TypeScript would otherwise have inferred.
+     * <p>A single-parameter declaration needs it too. {@code LiteralArgumentBuilder<S>} and
+     * {@code LiteralCommandNode<S>} recur through only one parameter each and, in isolation,
+     * that alone stays within TypeScript's depth limit -- but every functional-interface
+     * parameter across this codebase is wrapped in the conditional type {@code JavaFn<I>} (see
+     * {@link #renderParameter}), and a conditional type does not get the same recursion cache a
+     * plain generic reference does. Once the graph of single-parameter types that reach each
+     * other through a {@code JavaFn}-wrapped member is wide enough -- {@code CommandContext<S>},
+     * {@code CommandNode<S>} and {@code Command<S>} chase each other this way -- comparing two
+     * different instantiations still re-derives the same TS2589 by re-expanding every member,
+     * {@code JavaFn} included, instead of trusting the declared variance. Leaving any of them
+     * unannotated leaves that hole open, so the annotation is unconditional.
+     *
+     * <p>This costs the covariance TypeScript would otherwise have inferred for a type that
+     * happens to use its parameter only in output position, such as
+     * {@code Class<T>.getTypeParameters(): TypeVariable<Class<T>>[]}. That is a real ergonomics
+     * loss, not a correctness one -- Java's own generics are invariant there regardless -- and
+     * narrowing the annotation to {@code out T} for a parameter used only covariantly (or
+     * {@code in T} for one used only contravariantly) would recover it. Doing that soundly means
+     * computing real variance from every member, including what a supertype's own type argument
+     * inherits, which is a bigger change than a depth-limit fix warrants on its own.
      *
      * <p>Only for a declaration: a method (TS1274) and a type alias to anything but a literal
      * object, function, constructor or mapped type (TS2637) both reject the annotation.
      */
     String renderDeclarationFormals(List<Sig.Formal> formals, Set<String> typeVars,
                                     boolean withDefaults) {
-        return renderFormals(formals, typeVars, withDefaults, formals.size() > 1);
+        return renderFormals(formals, typeVars, withDefaults, !formals.isEmpty());
     }
 
     private String renderFormals(List<Sig.Formal> formals, Set<String> typeVars,
