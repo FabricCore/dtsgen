@@ -83,10 +83,20 @@ final class TypeMapper {
      * TypeScript has no conversion of its own, so the alternative has to be spelled out.
      */
     String renderParameter(Sig.Type type, Set<String> typeVars) {
-        String rendered = render(type, typeVars);
+        String rendered;
         // The two can both apply: Iterable is a functional interface and takes a JS array.
         if (acceptsFunction(type)) {
-            rendered = "JavaFn<" + rendered + ">";
+            Sig.Cls cls = (Sig.Cls) type;
+            // The interface's own Fn alias spells the function out, so it still has a call
+            // signature while its type arguments are unresolved -- as they are for a lambda
+            // passed to one generic call nested inside another. JavaFn has to infer the
+            // signature, and a conditional type on an unresolved argument stays deferred,
+            // leaving the lambda's parameters implicitly any.
+            rendered = universe.hasFnAliases(cls.internalName())
+                    ? renderAlias(cls, TypeUniverse.FN_ALIAS, typeVars)
+                    : "JavaFn<" + render(type, typeVars) + ">";
+        } else {
+            rendered = render(type, typeVars);
         }
         String alternative = jsAlternative(type, typeVars);
         // Parenthesised because a varargs parameter appends [] to whatever comes back.
@@ -136,13 +146,27 @@ final class TypeMapper {
                 : "any";
     }
 
+    /**
+     * A type alias declared in an interface's namespace, given the interface's type arguments:
+     * {@code Function.Lambda<T, R>}. Only for a type {@link TypeUniverse#hasFnAliases} holds of.
+     */
+    String renderAlias(Sig.Cls type, String alias, Set<String> typeVars) {
+        return renderClass(type, typeVars, alias);
+    }
+
     private String renderClass(Sig.Cls type, Set<String> typeVars) {
+        return renderClass(type, typeVars, null);
+    }
+
+    /** @param alias a type alias in the class's namespace to name instead of the class, or null */
+    private String renderClass(Sig.Cls type, Set<String> typeVars, String alias) {
         String converted = CONVERTED.get(type.internalName());
         if (converted != null) return converted;
         if (type.internalName().equals("java/lang/Object")) return "any";
 
         String ref = naming.ref(type.internalName());
         if (ref == null) return "any";
+        if (alias != null) ref = ref + "." + alias;
 
         int arity = naming.arity(type.internalName());
         if (arity == 0) return ref;
@@ -190,15 +214,15 @@ final class TypeMapper {
      *
      * <p>A single-parameter declaration needs it too. {@code LiteralArgumentBuilder<S>} and
      * {@code LiteralCommandNode<S>} recur through only one parameter each and, in isolation,
-     * that alone stays within TypeScript's depth limit -- but every functional-interface
-     * parameter across this codebase is wrapped in the conditional type {@code JavaFn<I>} (see
-     * {@link #renderParameter}), and a conditional type does not get the same recursion cache a
-     * plain generic reference does. Once the graph of single-parameter types that reach each
-     * other through a {@code JavaFn}-wrapped member is wide enough -- {@code CommandContext<S>},
-     * {@code CommandNode<S>} and {@code Command<S>} chase each other this way -- comparing two
-     * different instantiations still re-derives the same TS2589 by re-expanding every member,
-     * {@code JavaFn} included, instead of trusting the declared variance. Leaving any of them
-     * unannotated leaves that hole open, so the annotation is unconditional.
+     * that alone stays within TypeScript's depth limit -- but when every functional-interface
+     * parameter was wrapped in the conditional type {@code JavaFn<I>} (see
+     * {@link #renderParameter}, which now mostly names an interface's {@code Fn} alias instead),
+     * a conditional type does not get the same recursion cache a plain generic reference does.
+     * Once the graph of single-parameter types that reach each other through such a member is
+     * wide enough -- {@code CommandContext<S>}, {@code CommandNode<S>} and {@code Command<S>}
+     * chase each other this way -- comparing two different instantiations re-derived the same
+     * TS2589 by re-expanding every member instead of trusting the declared variance. Leaving any
+     * of them unannotated leaves that hole open, so the annotation is unconditional.
      *
      * <p>This costs the covariance TypeScript would otherwise have inferred for a type that
      * happens to use its parameter only in output position, such as

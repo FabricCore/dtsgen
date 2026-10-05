@@ -31,12 +31,19 @@ public final class TypeUniverse {
     private static final Set<String> OBJECT_METHODS = Set.of(
             "equals(Ljava/lang/Object;)Z", "hashCode()I", "toString()Ljava/lang/String;");
 
+    /** The bare JS function a functional interface converts from: {@code Runnable.Lambda}. */
+    public static final String LAMBDA_ALIAS = "Lambda";
+
+    /** What a parameter of a functional interface accepts, function or instance: {@code Runnable.Fn}. */
+    public static final String FN_ALIAS = "Fn";
+
     private final ScanResult scan;
     private final GlobMatcher opaque;
     private final Set<String> emitted = new LinkedHashSet<>();
     private final Map<String, List<JClass>> typesByFile = new TreeMap<>();
     private final Map<String, Integer> arity = new LinkedHashMap<>();
     private final Map<String, Boolean> functional = new HashMap<>();
+    private final Map<String, Boolean> fnAliases = new HashMap<>();
 
     /**
      * @param scan     everything that was read
@@ -193,6 +200,45 @@ public final class TypeUniverse {
     public JMember singleAbstractMethod(JClass type) {
         List<JMember> abstracts = declaredAbstractMethods(type);
         return abstracts.size() == 1 ? abstracts.get(0) : null;
+    }
+
+    /**
+     * True when a functional interface's namespace carries the {@link #LAMBDA_ALIAS} and
+     * {@link #FN_ALIAS} type aliases, which a parameter of it is then written with.
+     *
+     * <p>Not every functional interface can: a nested type already named like one of them takes
+     * the name, and an interface whose method is inherited builds its {@code Lambda} from the
+     * one it inherits from, so it has none when that one has none.
+     */
+    public boolean hasFnAliases(String internalName) {
+        // Not computeIfAbsent, for the same reason as isFunctionalInterface.
+        Boolean cached = fnAliases.get(internalName);
+        if (cached != null) return cached;
+        boolean result = computeFnAliases(internalName);
+        fnAliases.put(internalName, result);
+        return result;
+    }
+
+    private boolean computeFnAliases(String internalName) {
+        if (!isFunctionalInterface(internalName)) return false;
+        JClass type = scan.find(internalName);
+        for (JClass nested : directNestedTypes(type)) {
+            String name = nested.simpleName();
+            if (name.equals(FN_ALIAS) || name.equals(LAMBDA_ALIAS)) return false;
+        }
+        return singleAbstractMethod(type) != null || inheritedSamOwner(type) != null;
+    }
+
+    /**
+     * The superinterface a functional interface takes its single abstract method from, or null
+     * when it declares its own -- or when no superinterface has the aliases to build on.
+     */
+    public String inheritedSamOwner(JClass type) {
+        if (singleAbstractMethod(type) != null) return null;
+        for (String parent : type.interfaces()) {
+            if (hasFnAliases(parent)) return parent;
+        }
+        return null;
     }
 
     /** The abstract methods this interface declares itself, the ones Object provides aside. */

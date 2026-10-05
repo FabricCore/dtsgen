@@ -80,6 +80,12 @@ public final class RegistryEmitter {
              * function to one, so either form is accepted. NoInfer keeps a lambda's parameter
              * and return types flowing from the function side alone, which is what lets
              * `stream.map(s => s.length())` still come back as a Stream of numbers.
+             *
+             * Prefer the interface's own alias, `Foo.Fn<T>`, which is what generated parameters
+             * use. This is a conditional type, so while T is still unresolved -- a lambda passed
+             * to one generic call nested in another -- it stays deferred and the lambda's
+             * parameters come out implicitly any. It remains for the rare interface whose
+             * namespace cannot carry the alias, and for code already written against it.
              */
             type JavaFn<I> = I extends (...args: infer A) => infer R
               ? ((...args: A) => R) | NoInfer<I>

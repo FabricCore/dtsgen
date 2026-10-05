@@ -134,11 +134,17 @@ descriptor does not export `ws.siri.dtsgen.internal`. A bad config or missing so
 - a field and method sharing a name (`Vec3.x`, `x()`) become `number & { (): number }`
 - Java interfaces get an explicit value side; without it `Java.type` on one silently returns
   `any`, hidden by `skipLibCheck`. 674 are affected, 282 with statics
-- a functional interface parameter is `JavaFn<T>`, which takes a JS function as readily as an
+- a functional interface parameter is `Foo.Fn<T>`, which takes a JS function as readily as an
   instance, because GraalJS converts one at the call site and TypeScript has no such conversion
   of its own; the interface itself gains a call signature, since an instance of one is
-  executable from JS too. `NoInfer` inside `JavaFn` keeps a lambda's types inferring, so it
-  needs TypeScript 5.4 or newer
+  executable from JS too. Each functional interface's namespace carries the two aliases:
+  `Foo.Lambda<T>`, the bare function, and `Foo.Fn<T>`, that or an instance -- write them in
+  JSDoc for a parameter of your own that takes a callback. They spell the signature out rather
+  than inferring it, so a lambda keeps its parameter types even inside nested generic calls,
+  where the conditional `JavaFn<Foo<T>>` (still in `java.d.ts`, and still the form for the rare
+  interface whose namespace cannot carry the aliases) leaves them implicitly `any`. `NoInfer` on
+  the instance side's type arguments keeps a lambda's types inferring, so it needs TypeScript
+  5.4 or newer
 - a parameter typed as a type variable is never wrapped, because GraalJS converts by the
   *erased* parameter type: `Event<T>.register(T)` is `register(Object)` at runtime, so a JS
   function arrives as a `PolyglotMapAndFunction` implementing no interface, and Fabric's

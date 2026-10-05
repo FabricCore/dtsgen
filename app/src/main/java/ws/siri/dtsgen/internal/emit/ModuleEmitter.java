@@ -221,13 +221,22 @@ public final class ModuleEmitter {
         boolean hasNestedValues = nested.stream().anyMatch(n -> !n.isInterface());
 
         String self = selfType(name, universe.formalsOf(type));
+        List<String> aliases = opaque ? List.of() : fnAliases(type, mapper);
         if (!hasStatics && !hasNestedValues && nested.isEmpty()) {
             sb.append(indent).append(topLevel ? "export declare " : "").append("const ")
               .append(name).append(": JavaInterface<").append(self).append(">;\n");
+            // A namespace holding only types merges with the const without touching its value.
+            if (!aliases.isEmpty()) {
+                sb.append(indent).append(topLevel ? "export declare " : "")
+                  .append("namespace ").append(name).append(" {\n");
+                for (String alias : aliases) sb.append(indent).append("  ").append(alias).append('\n');
+                sb.append(indent).append("}\n");
+            }
             return;
         }
         sb.append(indent).append(topLevel ? "export declare " : "")
           .append("namespace ").append(name).append(" {\n");
+        for (String alias : aliases) sb.append(indent).append("  ").append(alias).append('\n');
         if (hasStatics) members(type, sb, indent + "  ", mapper, Set.of(), MemberStyle.NAMESPACE);
         for (JClass child : nested) emitType(child, sb, indent + "  ", false, mapper);
         if (!hasStatics && !hasNestedValues) {
@@ -252,6 +261,79 @@ public final class ModuleEmitter {
         JMember sam = universe.singleAbstractMethod(type);
         if (sam == null) return;
         sb.append(indent).append(callSignature(sam, mapper, classVars)).append(";\n");
+    }
+
+    /**
+     * The aliases a parameter of a functional interface is written with, or none for any other
+     * type: {@code Lambda}, the bare JS function GraalJS converts, and {@code Fn}, that or an
+     * instance. Both spell the signature out, rather than inferring it from the interface the
+     * way {@code JavaFn} does, so neither is a conditional type and neither defers on an
+     * unresolved type argument.
+     *
+     * <p>Fn's instance side takes its type arguments through {@code NoInfer}, so a type variable
+     * is inferred from the function side alone: open to inference, the interface's other members
+     * leave {@code stream.map((p: Path) => p.toString())} returning a Stream of unknown. The
+     * NoInfer goes on each argument rather than around the interface, because NoInfer of a
+     * still-generic interface is deferred the way JavaFn is, which costs a lambda in a nested
+     * generic call its contextual parameter types all over again.
+     */
+    private List<String> fnAliases(JClass type, TypeMapper mapper) {
+        if (!universe.hasFnAliases(type.internalName())) return List.of();
+        List<Sig.Formal> formals = universe.formalsOf(type);
+        Set<String> classVars = Signatures.namesOf(formals);
+        String params = mapper.renderFormals(formals, classVars, true);
+        String args = formals.isEmpty() ? "" : "<" + String.join(", ", formalNames(formals)) + ">";
+        String uninferredArgs = formals.isEmpty() ? "" : "<" + String.join(", ",
+                formalNames(formals).stream().map(n -> "NoInfer<" + n + ">").toList()) + ">";
+
+        String lambda;
+        JMember sam = universe.singleAbstractMethod(type);
+        if (sam != null) {
+            lambda = lambdaType(sam, mapper, classVars);
+        } else {
+            // Inherited, as UnaryOperator<T> inherits Function<T, T>'s apply: reuse that one's
+            // Lambda at the type arguments this interface passes it.
+            String owner = universe.inheritedSamOwner(type);
+            Sig.Cls parent = null;
+            for (Sig.Type candidate : Signatures.classSignature(type).interfaces()) {
+                if (candidate instanceof Sig.Cls cls && cls.internalName().equals(owner)) {
+                    parent = cls;
+                }
+            }
+            if (parent == null) {
+                throw new IllegalStateException(type.internalName() + " does not extend " + owner);
+            }
+            lambda = mapper.renderAlias(parent, TypeUniverse.LAMBDA_ALIAS, classVars);
+        }
+
+        return List.of(
+                "type " + TypeUniverse.LAMBDA_ALIAS + params + " = " + lambda + ";",
+                "type " + TypeUniverse.FN_ALIAS + params + " = " + TypeUniverse.LAMBDA_ALIAS
+                        + args + " | " + type.simpleName() + uninferredArgs + ";");
+    }
+
+    /**
+     * {@code <T>(a: A) => R}, the single abstract method as the JS function implementing it.
+     * Its parameters are what Java hands that function, so unlike a call signature's they admit
+     * no JS form -- Java passes a Runnable as a Runnable, never as a function.
+     */
+    private String lambdaType(JMember method, TypeMapper mapper, Set<String> classVars) {
+        Sig.MethodSig signature = Signatures.method(method);
+        Set<String> vars = scopeOf(classVars, signature);
+        List<Sig.Type> parameters = signature.params();
+        boolean named = method.hasParameterNames(parameters.size());
+        StringBuilder sb = new StringBuilder(mapper.renderFormals(signature.formals(), vars, false))
+                .append('(');
+        Set<String> usedNames = new LinkedHashSet<>();
+        for (int i = 0; i < parameters.size(); i++) {
+            if (i > 0) sb.append(", ");
+            String name = Names.param(named ? method.parameterNames().get(i) : null, i);
+            if (!usedNames.add(name)) name = "a" + i;
+            // A varargs array arrives as the one argument it is: Java calls the function with
+            // the method's arguments, and the last of those is the array itself.
+            sb.append(name).append(": ").append(mapper.render(parameters.get(i), vars));
+        }
+        return sb.append(") => ").append(mapper.render(signature.returnType(), vars)).toString();
     }
 
     /**
